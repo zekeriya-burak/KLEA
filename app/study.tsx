@@ -35,7 +35,10 @@ export default function StudyScreen() {
       try {
         // Use DatabaseService to get due words (prioritizing reviews)
         const catId = categoryId ? parseInt(Array.isArray(categoryId) ? categoryId[0] : categoryId, 10) : undefined;
-        const words = await DatabaseService.getDueWords(selectedLevel as string, 20, catId);
+        // Parse limit from params, default to 10 if missing/invalid
+        const limitVal = limit ? parseInt(Array.isArray(limit) ? limit[0] : limit, 10) : 10;
+
+        const words = await DatabaseService.getDueWords(selectedLevel as string, limitVal, catId);
 
         // No shuffle? 
         // SRS usually presents due words in order (most overdue first), or random among due.
@@ -97,13 +100,24 @@ export default function StudyScreen() {
 
   const handleNextCard = async (isCorrect: boolean) => {
     console.log(isCorrect ? "Correct" : "Incorrect");
-    const word = filteredVocabulary[currentIndex];
+    const currentIndex = currentIndexRef.current;
+    const currentList = filteredVocabularyRef.current;
+
+    // Safety check
+    if (!currentList || currentIndex >= currentList.length) {
+      console.warn("Invalid index or list");
+      return;
+    }
+
+    const word = currentList[currentIndex];
 
     // Fire and forget update stats
-    DatabaseService.markWordResult(word.id, isCorrect).catch(console.error);
+    if (word) {
+      DatabaseService.markWordResult(word.id, isCorrect).catch(console.error);
+    }
 
     // Use ref for current index check against CURRENT filtered list
-    if (currentIndexRef.current >= filteredVocabularyRef.current.length - 1) {
+    if (currentIndex >= currentList.length - 1) {
       setIsCompleted(true);
       return;
     }

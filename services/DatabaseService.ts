@@ -57,11 +57,20 @@ export class DatabaseService {
         correct_count INTEGER DEFAULT 0,
         incorrect_count INTEGER DEFAULT 0,
         last_reviewed_at DATETIME,
-        next_review_at DATETIME,
-        srs_stage INTEGER DEFAULT 0,
+        next_review_at DATETIME, -- We might keep this for legacy or reference, but logic moves to score
+        score INTEGER DEFAULT 100, -- Default score (Higher = Needs more practice)
+        srs_stage INTEGER DEFAULT 0, -- Legacy
         FOREIGN KEY (word_id) REFERENCES words (id)
       );
     `);
+
+        // Migration: Check if score column exists
+        try {
+            await db.runAsync('ALTER TABLE user_word_stats ADD COLUMN score INTEGER DEFAULT 100');
+            console.log("Added score column to user_word_stats");
+        } catch (e) {
+            // Column likely exists
+        }
 
         // Check if seeded
         const result = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) as count FROM words');
@@ -171,30 +180,69 @@ export class DatabaseService {
     // SRS Methods
     static async getDueWords(level: string, limit: number = 10, categoryId?: number): Promise<Word[]> {
         const db = await this.getDB();
-        const now = new Date().toISOString();
 
-        // Base query
-        let query = `
+        // Split logic:
+        // 1. Fetch Review Candidates (using Weighted Random on Score)
+        // 2. Fetch New Candidates (Pure Random)
+        // 3. Combine to fill limit
+
+        // 1. Review Words
+        // Filter: Has stats AND difficulty matches
+        let reviewQuery = `
+            SELECT w.* 
+            FROM words w
+            JOIN user_word_stats s ON w.id = s.word_id
+            WHERE w.difficulty_level = ?
+        `;
+        const reviewParams: (string | number)[] = [level];
+
+        if (categoryId) {
+            reviewQuery += ` AND w.category_id = ? `;
+            reviewParams.push(categoryId);
+        }
+
+        // Weighted Random for Reviews
+        // Weight = Score + TimeBonus
+        // Note: Replaced LOG() with direct fraction because LOG() is missing in Expo SQLite
+        reviewQuery += `
+            ORDER BY (ABS(RANDOM() / 9223372036854775807.0) + 1e-10) / 
+            (s.score + ((julianday('now') - julianday(s.last_reviewed_at)) * 24 * 5)) ASC
+            LIMIT ?
+        `;
+        reviewParams.push(limit);
+
+        const reviewWords = await db.getAllAsync<Word>(reviewQuery, reviewParams);
+
+        // If we filled the limit with high-priority reviews, return them
+        if (reviewWords.length >= limit) {
+            return reviewWords;
+        }
+
+        // 2. New Words
+        // Filter: No stats AND matches difficulty
+        const remainingLimit = limit - reviewWords.length;
+
+        let newQuery = `
             SELECT w.* 
             FROM words w
             LEFT JOIN user_word_stats s ON w.id = s.word_id
             WHERE w.difficulty_level = ?
+            AND s.id IS NULL
         `;
-        const params: (string | number)[] = [level];
+        const newParams: (string | number)[] = [level];
 
         if (categoryId) {
-            query += ` AND w.category_id = ? `;
-            params.push(categoryId);
+            newQuery += ` AND w.category_id = ? `;
+            newParams.push(categoryId);
         }
 
-        query += `
-            AND (s.next_review_at IS NULL OR s.next_review_at <= ?)
-            ORDER BY s.next_review_at ASC
-            LIMIT ?
-        `;
-        params.push(now, limit);
+        // Pure Random for new words to ensure mixing
+        newQuery += ` ORDER BY RANDOM() LIMIT ? `;
+        newParams.push(remainingLimit);
 
-        return await db.getAllAsync<Word>(query, params);
+        const newWords = await db.getAllAsync<Word>(newQuery, newParams);
+
+        return [...reviewWords, ...newWords];
     }
 
     static async getAllCategories(): Promise<Category[]> {
@@ -215,42 +263,42 @@ export class DatabaseService {
 
         // Get current stats
         const currentStats = await db.getFirstAsync<{
-            id: number, srs_stage: number, correct_count: number, incorrect_count: number
+            id: number, score: number, correct_count: number, incorrect_count: number
         }>(
             'SELECT * FROM user_word_stats WHERE word_id = ?',
             [wordId]
         );
 
-        let stage = 0;
+        let score = 100; // Default if new
         let correct = 0;
         let incorrect = 0;
 
         if (currentStats) {
-            stage = currentStats.srs_stage;
+            score = currentStats.score || 100; // Handle migration case
             correct = currentStats.correct_count;
             incorrect = currentStats.incorrect_count;
         }
 
-        // Calculate next
-        const { nextReview, nextStage } = calculateNextReview(stage, isCorrect);
-
-        if (isCorrect) correct++;
-        else incorrect++;
-
-        const nextReviewIso = nextReview.toISOString();
+        if (isCorrect) {
+            correct++;
+            score = Math.max(1, score - 10); // Decrease score (easier), min 1
+        } else {
+            incorrect++;
+            score = Math.min(1000, score + 20); // Increase score (harder), max 1000
+        }
 
         if (currentStats) {
             await db.runAsync(
                 `UPDATE user_word_stats 
-                SET correct_count = ?, incorrect_count = ?, last_reviewed_at = ?, next_review_at = ?, srs_stage = ?
+                SET correct_count = ?, incorrect_count = ?, last_reviewed_at = ?, score = ?
                 WHERE id = ?`,
-                [correct, incorrect, now, nextReviewIso, nextStage, currentStats.id]
+                [correct, incorrect, now, score, currentStats.id]
             );
         } else {
             await db.runAsync(
-                `INSERT INTO user_word_stats (word_id, correct_count, incorrect_count, last_reviewed_at, next_review_at, srs_stage)
-                VALUES (?, ?, ?, ?, ?, ?)`,
-                [wordId, correct, incorrect, now, nextReviewIso, nextStage] // wordId matches ?
+                `INSERT INTO user_word_stats (word_id, correct_count, incorrect_count, last_reviewed_at, score)
+                VALUES (?, ?, ?, ?, ?)`,
+                [wordId, correct, incorrect, now, score]
             );
         }
     }
