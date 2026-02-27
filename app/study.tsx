@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, Dimensions, Animated, PanResponder, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Dimensions, Animated, PanResponder, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Stack, useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const SWIPE_THRESHOLD = 120;
@@ -4629,26 +4631,126 @@ const VOCABULARY = [
 ];
 
 export default function StudyScreen() {
-  const { level, limit } = useLocalSearchParams();
+  const { level, limit, mode, difficulty } = useLocalSearchParams();
   const selectedLevel = Array.isArray(level) ? level[0] : level || "A1";
+  const selectedDifficulty = Array.isArray(difficulty) ? difficulty[0] : difficulty || "easy";
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
 
-  // Derived state for filtered vocabulary
-  const filteredVocabulary = useMemo(() => {
-    const targetLimit = parseInt(Array.isArray(limit) ? limit[0] : limit || "10", 10);
-    const filtered = VOCABULARY.filter(word => word.level === selectedLevel);
+  const [filteredVocabulary, setFilteredVocabulary] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
-    // Shuffle
-    for (let i = filtered.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [filtered[i], filtered[j]] = [filtered[j], filtered[i]];
-    }
+  // Load and derive state for vocabulary deck
+  useEffect(() => {
+    const loadDeck = async () => {
+      setIsLoading(true);
+      try {
+        const targetLimit = parseInt(Array.isArray(limit) ? limit[0] : limit || "10", 10);
+        const isDailyMode = mode === 'daily' || (Array.isArray(mode) && mode[0] === 'daily');
 
-    return filtered.slice(0, targetLimit);
-  }, [selectedLevel, limit]);
+        // Load progress
+        const storedProgress = await AsyncStorage.getItem('word_progress');
+        const progress = storedProgress ? JSON.parse(storedProgress) : {};
+
+        let finalDeck: any[] = [];
+
+        if (isDailyMode) {
+          const getRandomWords = (lvl: string, count: number, excludeIds: number[] = []) => {
+            const filtered = VOCABULARY.filter(w => w.level === lvl && !excludeIds.includes(w.id));
+            const wordsWithProgress = filtered.map(word => ({
+              ...word,
+              score: progress[word.id]?.score || 0
+            }));
+
+            // Shuffle
+            for (let i = wordsWithProgress.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [wordsWithProgress[i], wordsWithProgress[j]] = [wordsWithProgress[j], wordsWithProgress[i]];
+            }
+
+            // Sort ascending by score
+            wordsWithProgress.sort((a, b) => a.score - b.score);
+            return wordsWithProgress.slice(0, count);
+          };
+
+          let deck: any[] = [];
+          let fallbackLevel = 'A1';
+
+          if (selectedDifficulty === 'easy') {
+            deck = [
+              ...getRandomWords('A1', 8),
+              ...getRandomWords('A2', 8),
+              ...getRandomWords('B1', 4)
+            ];
+            fallbackLevel = 'A1';
+          } else if (selectedDifficulty === 'medium') {
+            deck = [
+              ...getRandomWords('B1', 7),
+              ...getRandomWords('B2', 7),
+              ...getRandomWords('A2', 3),
+              ...getRandomWords('C1', 3)
+            ];
+            fallbackLevel = 'B1';
+          } else if (selectedDifficulty === 'hard') {
+            deck = [
+              ...getRandomWords('B2', 8),
+              ...getRandomWords('C1', 8),
+              ...getRandomWords('B1', 4)
+            ];
+            fallbackLevel = 'B2';
+          }
+
+          // Fallback logic if any level didn't have enough words
+          if (deck.length < 20) {
+            const currentIds = deck.map(w => w.id);
+            const needed = 20 - deck.length;
+            const extraWords = getRandomWords(fallbackLevel, needed, currentIds);
+            deck = [...deck, ...extraWords];
+          }
+
+          // Final shuffle
+          for (let i = deck.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [deck[i], deck[j]] = [deck[j], deck[i]];
+          }
+          finalDeck = deck;
+
+        } else {
+          // Standard Custom Practice Logic
+          const filtered = VOCABULARY.filter(word => word.level === selectedLevel);
+          const wordsWithProgress = filtered.map(word => {
+            const wordScore = progress[word.id]?.score || 0;
+            return { ...word, score: wordScore };
+          });
+
+          for (let i = wordsWithProgress.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [wordsWithProgress[i], wordsWithProgress[j]] = [wordsWithProgress[j], wordsWithProgress[i]];
+          }
+
+          wordsWithProgress.sort((a, b) => a.score - b.score);
+          const sliced = wordsWithProgress.slice(0, targetLimit);
+
+          for (let i = sliced.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [sliced[i], sliced[j]] = [sliced[j], sliced[i]];
+          }
+
+          finalDeck = sliced;
+        }
+
+        setFilteredVocabulary(finalDeck);
+      } catch (e) {
+        console.error("Error loading deck:", e);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadDeck();
+  }, [selectedLevel, limit, mode, difficulty]);
 
   // Animation Values
   const pan = useRef(new Animated.ValueXY()).current;
@@ -4684,15 +4786,68 @@ export default function StudyScreen() {
   // Reset everything when level changes - REMOVED
   // const handleLevelChange = (level: string) => { ... }
 
-  const handleNextCard = (isCorrect: boolean) => {
+  const handleNextCard = async (isCorrect: boolean) => {
     console.log(isCorrect ? "Correct" : "Incorrect");
 
-    // Use ref for current index check against CURRENT filtered list
+    const currentCard = filteredVocabularyRef.current[currentIndexRef.current];
+    if (!currentCard) return;
+
+    // Update progress
+    try {
+      const storedProgress = await AsyncStorage.getItem('word_progress');
+      const progress = storedProgress ? JSON.parse(storedProgress) : {};
+
+      const rawId = currentCard.id.toString().replace(/_retry_.*/, "");
+      const currentScore = progress[rawId]?.score || 0;
+      let newScore = isCorrect ? currentScore + 1 : currentScore - 2;
+
+      if (newScore < -5) newScore = -5; // Minimum -5
+
+      progress[rawId] = {
+        score: newScore,
+        lastReviewed: new Date().toISOString()
+      };
+
+      await AsyncStorage.setItem('word_progress', JSON.stringify(progress));
+    } catch (e) {
+      console.error("Error saving progress:", e);
+    }
+
+    // Move to next card regardless of correct/incorrect
     if (currentIndexRef.current >= filteredVocabularyRef.current.length - 1) {
+      const isDailyMode = mode === 'daily' || (Array.isArray(mode) && mode[0] === 'daily');
+      if (isDailyMode) {
+        try {
+          const statsStr = await AsyncStorage.getItem('user_stats');
+          const today = new Date().toDateString();
+          let stats = statsStr ? JSON.parse(statsStr) : { streak: 0, lastStudyDate: null };
+
+          if (stats.lastStudyDate !== today) {
+            stats.streak = (stats.streak || 0) + 1;
+            stats.lastStudyDate = today;
+            await AsyncStorage.setItem('user_stats', JSON.stringify(stats));
+          }
+
+          // Schedule Notification
+          await Notifications.cancelAllScheduledNotificationsAsync();
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "Time to practice! 🚀",
+              body: "Your vocabulary is waiting. Don't lose your streak!",
+              sound: true,
+            },
+            trigger: {
+              seconds: 86400,
+              type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            }
+          });
+        } catch (e) {
+          console.error("Daily tracking error:", e);
+        }
+      }
       setIsCompleted(true);
       return;
     }
-
     setCurrentIndex((prev) => prev + 1);
   };
 
@@ -4803,6 +4958,14 @@ export default function StudyScreen() {
     ]
   };
 
+  if (isLoading) {
+    return (
+      <SafeAreaView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#4F46E5" />
+      </SafeAreaView>
+    );
+  }
+
   if (isCompleted) {
     return (
       <SafeAreaView style={styles.container}>
@@ -4815,8 +4978,8 @@ export default function StudyScreen() {
         </View>
         <View style={styles.completedContainer}>
           <Ionicons name="trophy" size={80} color="#F59E0B" />
-          <Text style={styles.completedTitle}>{selectedLevel} Completed!</Text>
-          <Text style={styles.completedSubtitle}>You've reviewed all cards in this level.</Text>
+          <Text style={styles.completedTitle}>{(mode === 'daily' || (Array.isArray(mode) && mode[0] === 'daily')) ? "Daily Mode Completed!" : `${selectedLevel} Completed!`}</Text>
+          <Text style={styles.completedSubtitle}>{(mode === 'daily' || (Array.isArray(mode) && mode[0] === 'daily')) ? "Great job! Keep up the daily streak. See you tomorrow!" : "You've reviewed all cards in this level."}</Text>
           <TouchableOpacity style={styles.restartButton} onPress={() => router.back()}>
             <Text style={styles.restartButtonText}>Back to Setup</Text>
           </TouchableOpacity>

@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "KLEA",
-    "slug": "klea-language-app",
+    "slug": "klea102",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
@@ -12,7 +12,8 @@
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#ffffff"
-      }
+      },
+      "package": "com.rambokansorganization.klea"
     },
     "web": {
       "bundler": "metro",
@@ -25,6 +26,15 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "f33c3db8-c6c2-42c3-aa5f-981ac8c0c297"
+      }
+    },
+    "owner": "rambokans-organization"
   }
 }
